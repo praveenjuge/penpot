@@ -10,9 +10,12 @@
    [app.common.colors :as cc]
    [app.common.data :as d]
    [app.common.data.macros :as dm]
+   [app.common.geom.matrix :as gmt]
+   [app.common.geom.point :as gpt]
    [app.config :as cfg]
    [app.main.data.events :as-alias ev]
    [app.main.data.modal :as modal]
+   [app.main.data.shortcuts :as dsc]
    [app.main.data.workspace.colors :as dc]
    [app.main.data.workspace.libraries :as dwl]
    [app.main.data.workspace.media :as dwm]
@@ -30,8 +33,10 @@
    [app.main.ui.workspace.colorpicker.hsva :refer [hsva-selector]]
    [app.main.ui.workspace.colorpicker.libraries :refer [libraries]]
    [app.main.ui.workspace.colorpicker.ramp :refer [ramp-selector]]
+   [app.main.ui.workspace.colorpicker.shortcuts :as sc]
    [app.util.dom :as dom]
    [app.util.i18n :as i18n :refer [tr]]
+   [app.util.timers :as ts]
    [cuerdas.core :as str]
    [okulary.core :as l]
    [potok.v2.core :as ptk]
@@ -78,6 +83,8 @@
   (let [state                  (mf/deref refs/colorpicker)
         node-ref               (mf/use-ref)
 
+        should-update?         (mf/use-var true)
+
         ;; TODO: I think we need to put all this picking state under
         ;; the same object for avoid creating adhoc refs for each
         ;; value
@@ -99,7 +106,12 @@
 
         fill-image-ref         (mf/use-ref nil)
 
-        selected-mode          (get state :type :color)
+        color-type             (get state :type :color)
+        selected-mode          (case color-type
+                                 (:linear-gradient :radial-gradient)
+                                 :gradient
+
+                                 color-type)
 
         disabled-color-accept? (and
                                 (= selected-mode :image)
@@ -147,9 +159,9 @@
          (fn [value]
            (case value
              :color (st/emit! (dc/activate-colorpicker-color))
-             :linear-gradient (st/emit! (dc/activate-colorpicker-gradient :linear-gradient))
-             :radial-gradient (st/emit! (dc/activate-colorpicker-gradient :radial-gradient))
-             :image (st/emit! (dc/activate-colorpicker-image)))))
+             :gradient (st/emit! (dc/activate-colorpicker-gradient :linear-gradient))
+             :image (st/emit! (dc/activate-colorpicker-image))
+             nil)))
 
         handle-change-color
         (mf/use-fn
@@ -173,14 +185,6 @@
              (do (modal/allow-click-outside!)
                  (st/emit! (dc/start-picker))))))
 
-        handle-change-stop
-        (mf/use-fn
-         (fn [event]
-           (let [offset  (-> (dom/get-current-target event)
-                             (dom/get-data "value")
-                             (d/parse-integer))]
-             (st/emit! (dc/select-colorpicker-gradient-stop offset)))))
-
         on-select-library-color
         (mf/use-fn
          (mf/deps data handle-change-color)
@@ -203,6 +207,7 @@
         (mf/use-fn
          (mf/deps drag? node-ref)
          (fn []
+           (reset! should-update? false)
            (reset! drag? true)
            (st/emit! (dwu/start-undo-transaction (mf/ref-val node-ref)))))
 
@@ -210,6 +215,7 @@
         (mf/use-fn
          (mf/deps drag? node-ref)
          (fn []
+           (reset! should-update? true)
            (reset! drag? false)
            (st/emit! (dwu/commit-undo-transaction (mf/ref-val node-ref)))))
 
@@ -225,10 +231,98 @@
           (d/concat-vec
            [{:value :color :label (tr "media.solid")}]
            (when (not disable-gradient)
-             [{:value :linear-gradient :label (tr "media.linear")}
-              {:value :radial-gradient :label (tr "media.radial")}])
+             [{:value :gradient :label (tr "media.gradient")}])
            (when (not disable-image)
              [{:value :image :label (tr "media.image")}])))
+
+        handle-change-gradient-selected-stop
+        (mf/use-fn
+         (fn [index]
+           (st/emit! (dc/select-colorpicker-gradient-stop index))))
+
+        handle-change-gradient-type
+        (mf/use-fn
+         (fn [type]
+           (st/emit! (dc/activate-colorpicker-gradient type))))
+
+        handle-gradient-change-stop
+        (mf/use-fn
+         (mf/deps state)
+         (fn [prev-stop new-stop]
+           (let [stops (->> (:stops state)
+                            (mapv #(if (= % prev-stop) new-stop %)))]
+             (st/emit! (dc/update-colorpicker-stops stops)))))
+
+        handle-gradient-add-stop-auto
+        (mf/use-fn
+         (fn []
+           (st/emit! (dc/update-colorpicker-add-auto))))
+
+        handle-gradient-add-stop-preview
+        (mf/use-fn
+         (fn [offset]
+           (st/emit! (dc/update-colorpicker-add-stop offset))))
+
+        handle-gradient-remove-stop
+        (mf/use-fn
+         (mf/deps state)
+         (fn [stop]
+           (when (> (count (:stops state)) 2)
+             (when-let [index (d/index-of-pred (:stops state) #(= % stop))]
+               (st/emit! (dc/remove-gradient-stop index))))))
+
+        handle-stop-edit-start
+        (mf/use-fn
+         (fn []
+           (reset! should-update? false)))
+
+        handle-stop-edit-finish
+        (mf/use-fn
+         (mf/deps state)
+         (fn []
+           (reset! should-update? true)
+
+           ;; Update asynchronously so we can update with the new stops
+           (ts/schedule #(st/emit! (dc/sort-colorpicker-stops)))))
+
+        handle-rotate-stops
+        (mf/use-fn
+         (mf/deps state)
+         (fn []
+           (let [gradient (:gradient state)
+                 mtx (gmt/rotate-matrix -90 (gpt/point 0.5 0.5))
+
+                 start-p (-> (gpt/point (:start-x gradient) (:start-y gradient))
+                             (gpt/transform mtx))
+
+                 end-p (-> (gpt/point (:end-x gradient) (:end-y gradient))
+                           (gpt/transform mtx))]
+             (st/emit! (dc/update-colorpicker-gradient {:start-x (:x start-p)
+                                                        :start-y (:y start-p)
+                                                        :end-x (:x end-p)
+                                                        :end-y (:y end-p)})))))
+
+        handle-reverse-stops
+        (mf/use-fn
+         (mf/deps (:stops state))
+         (fn []
+           (let [stops (->> (:stops state)
+                            (map (fn [it] (update it :offset #(+ 1 (* -1 %)))))
+                            (sort-by :offset)
+                            (into []))]
+             (st/emit! (dc/update-colorpicker-stops stops)))))
+
+        handle-reorder-stops
+        (mf/use-fn
+         (mf/deps (:stops state))
+         (fn [from-index to-index]
+           (let [stops (:stops state)
+                 new-stops
+                 (-> stops
+                     (d/insert-at-index to-index [(get stops from-index)]))
+                 stops
+                 (mapv #(assoc %2 :offset (:offset %1)) stops new-stops)]
+             (st/emit! (dc/update-colorpicker-stops stops)))))
 
         tabs
         #js [#js {:aria-label (tr "workspace.libraries.colors.rgba")
@@ -280,7 +374,8 @@
 
     ;; Update colorpicker with external color changes
     (mf/with-effect [data]
-      (st/emit! (dc/update-colorpicker data)))
+      (when @should-update?
+        (st/emit! (dc/update-colorpicker data))))
 
     ;; Updates the CSS color variable when there is a change in the color
     (use-color-picker-css-variables! node-ref current-color)
@@ -312,12 +407,22 @@
                   :on-click handle-click-picker}
          i/picker])]
 
-     (when (or (= selected-mode :linear-gradient)
-               (= selected-mode :radial-gradient))
+     (when (= selected-mode :gradient)
        [:& gradients
-        {:stops (:stops state)
+        {:type (:type state)
+         :stops (:stops state)
          :editing-stop (:editing-stop state)
-         :on-select-stop handle-change-stop}])
+         :on-stop-edit-start handle-stop-edit-start
+         :on-stop-edit-finish handle-stop-edit-finish
+         :on-select-stop handle-change-gradient-selected-stop
+         :on-change-type handle-change-gradient-type
+         :on-change-stop handle-gradient-change-stop
+         :on-add-stop-auto handle-gradient-add-stop-auto
+         :on-add-stop-preview handle-gradient-add-stop-preview
+         :on-remove-stop handle-gradient-remove-stop
+         :on-rotate-stops handle-rotate-stops
+         :on-reverse-stops handle-reverse-stops
+         :on-reorder-stops handle-reorder-stops}])
 
      (if (= selected-mode :image)
        (let [uri (cfg/resolve-file-media (:image current-color))
@@ -383,9 +488,9 @@
 
 (defn calculate-position
   "Calculates the style properties for the given coordinates and position"
-  [{vh :height} position x y]
+  [{vh :height} position x y gradient?]
   (let [;; picker size in pixels
-        h 510
+        h (if gradient? 820 510)
         w 284
         ;; Checks for overflow outside the viewport height
         max-y   (- vh h)
@@ -433,22 +538,25 @@
         dirty?      (mf/use-var false)
         last-change (mf/use-var nil)
         position    (d/nilv position :left)
-        style       (calculate-position vport position x y)
+        style       (calculate-position vport position x y (some? (:gradient data)))
 
         on-change'
         (mf/use-fn
          (mf/deps on-change)
          (fn [new-data]
            (reset! dirty? (not= data new-data))
-           (reset! last-change new-data)
-
-           (if (fn? on-change)
-             (on-change new-data)
-             (st/emit! (dc/update-colorpicker new-data)))))]
+           (when (not= new-data @last-change)
+             (reset! last-change new-data)
+             (if (fn? on-change)
+               (on-change new-data)
+               (st/emit! (dc/update-colorpicker new-data))))))]
 
     (mf/with-effect []
-      #(when (and @dirty? @last-change on-close)
-         (on-close @last-change)))
+      (st/emit! (st/emit! (dsc/push-shortcuts ::colorpicker sc/shortcuts)))
+      #(do
+         (st/emit! (dsc/pop-shortcuts ::colorpicker))
+         (when (and @dirty? @last-change on-close)
+           (on-close @last-change))))
 
     [:div {:class (stl/css :colorpicker-tooltip)
            :data-testid "colorpicker"
