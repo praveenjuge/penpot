@@ -24,8 +24,24 @@
    [app.util.keyboard :as kbd]
    [app.util.time :as dt]
    [cuerdas.core :as str]
+   [clojure.string :as cstr]
    [okulary.core :as l]
    [rumext.v2 :as mf]))
+
+(def r-mentions-split #"@\[[^\]]*\]\([^\)]*\)")
+(def r-mentions #"@\[([^\]]*)\]\(([^\)]*)\)")
+
+(defn parse-comment
+  [users comment]
+  (interleave
+   (->> (str/split comment r-mentions-split)
+        (map #(hash-map :type :text :content %)))
+
+   (->> (re-seq r-mentions comment)
+        (map (fn [[_ user id]]
+               {:type :mention
+                :content user
+                :data {:id id}})))))
 
 (def comments-local-options (l/derived :options refs/comments-local))
 
@@ -49,6 +65,7 @@
         (mf/use-fn
          (mf/deps on-change)
          (fn [event]
+           (.log js/console (.-innerHTML (.-currentTarget event)))
            (let [content (dom/get-target-val event)]
              (on-change content))))
 
@@ -56,12 +73,14 @@
         (mf/use-fn
          (mf/deps on-esc on-ctrl-enter on-change*)
          (fn [event]
+           ;;(.log js/console "key-down" event)
            (cond
              (and (kbd/esc? event) (fn? on-esc)) (on-esc event)
              (and (kbd/mod? event) (kbd/enter? event) (fn? on-ctrl-enter))
              (do
                (on-change* event)
-               (on-ctrl-enter event)))))
+               (on-ctrl-enter event))
+             )))
 
         on-focus*
         (mf/use-fn
@@ -76,26 +95,39 @@
                ;; In webkit browsers the mouseup event will be called after the on-focus causing and unselect
                (.addEventListener target "mouseup" dom/prevent-default #js {:once true})))))]
 
-    (mf/use-layout-effect
-     nil
-     (fn []
-       (let [node (mf/ref-val local-ref)]
-         (set! (.-height (.-style node)) "0")
-         (set! (.-height (.-style node)) (str (+ 2 (.-scrollHeight node)) "px")))))
+    #_(mf/use-layout-effect
+       nil
+       (fn []
+         (let [node (mf/ref-val local-ref)]
+           (set! (.-height (.-style node)) "0")
+           (set! (.-height (.-style node)) (str (+ 2 (.-scrollHeight node)) "px")))))
 
-    [:textarea {:ref local-ref
-                :auto-focus autofocus?
-                :on-key-down on-key-down
-                :on-focus on-focus*
-                :on-blur on-blur
-                :value value
-                :placeholder placeholder
-                :on-change on-change*
-                :max-length max-length}]))
+
+    [:div {:class (stl/css :editable-div)
+           :content-editable true
+           :ref local-ref
+           :auto-focus autofocus?
+           :on-key-down on-key-down
+           :on-focus on-focus*
+           :on-blur on-blur
+           :placeholder placeholder
+           :on-key-up on-change*
+           :max-length max-length}
+     ;;value
+     ]
+    #_[:textarea {:ref local-ref
+                  :auto-focus autofocus?
+                  :on-key-down on-key-down
+                  :on-focus on-focus*
+                  :on-blur on-blur
+                  :value value
+                  :placeholder placeholder
+                  :on-change on-change*
+                  :max-length max-length}]))
 
 (mf/defc reply-form
   [{:keys [thread] :as props}]
-  (let [show-buttons? (mf/use-state false)
+  (let [show-buttons? (mf/use-state true)
         content       (mf/use-state "")
 
         disabled? (or (str/blank? @content)
@@ -259,6 +291,8 @@
         options  (mf/deref comments-local-options)
         edition? (mf/use-state false)
 
+        comment-elements (mf/use-memo #(parse-comment users (:content comment)))
+
         on-toggle-options
         (mf/use-fn
          (mf/deps options)
@@ -346,7 +380,13 @@
          [:& edit-form {:content (:content comment)
                         :on-submit on-submit
                         :on-cancel on-cancel}]
-         [:span {:class (stl/css :text)} (:content comment)])]]
+         (for [{:keys [type content]} comment-elements]
+           (case type
+             [:span
+              {:class (stl/css-case
+                       :comment-text (= type :text)
+                       :comment-mention (= type :mention))}
+              content])))]]
 
      [:& dropdown {:show (= options (:id comment))
                    :on-close on-hide-options}
@@ -373,7 +413,7 @@
         w (:width viewport)
         h (:height viewport)
         comment-width 284 ;; TODO: this is the width set via CSS in an outer container…
-                          ;; We should probably do this in a different way.
+        ;; We should probably do this in a different way.
         orientation-left? (>= (+ base-x comment-width (:x bubble-margin)) w)
         orientation-top? (>= base-y (/ h 2))
         h-dir (if orientation-left? :left :right)
@@ -394,7 +434,7 @@
                        (gpt/transform position-modifier))
 
         max-height   (when (some? viewport) (int (* (:height viewport) 0.75)))
-                          ;; We should probably look for a better way of doing this.
+        ;; We should probably look for a better way of doing this.
         bubble-margin {:x 24 :y 0}
         pos          (offset-position base-pos viewport zoom bubble-margin)
 
@@ -411,7 +451,14 @@
                        (->> (vals comments-map)
                             (sort-by :created-at)))
 
-        comment      (first comments)]
+        comment      (first comments)
+
+        handle-click-mention
+        (mf/use-callback
+         (fn [event]
+           (dom/prevent-default event)
+           (dom/stop-propagation event)))
+        ]
 
     (mf/with-effect [thread-id]
       (st/emit! (dcm/retrieve-comments thread-id)))
@@ -444,7 +491,18 @@
                              :users users
                              :origin origin}]])]
        [:& reply-form {:thread thread}]
-       [:div {:ref ref}]])))
+       [:div {:ref ref}]
+
+       [:div {:class (stl/css :comments-mentions-choice)}
+        (for [{:keys [id fullname email] :as user} (vals users)]
+          [:div {:on-pointer-down handle-click-mention
+                 :data-id (dm/str id)
+                 :class (stl/css :comments-mentions-entry)}
+           [:img {:class (stl/css :comments-mentions-avatar)
+                  :src (cfg/resolve-profile-photo-url user)}]
+           [:div {:class (stl/css :comments-mentions-name)} fullname]
+           [:div {:class (stl/css :comments-mentions-email) } email]])]
+       ])))
 
 (defn use-buble
   [zoom {:keys [position frame-id]}]

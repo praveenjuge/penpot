@@ -111,6 +111,10 @@
   white-space: pre-wrap;
 }
 
+.comment-mention {
+  color: var(--color-accent-primary);
+}
+
 .replies {
   display: flex;
   gap: $s-8;
@@ -142,7 +146,6 @@
 // thread-content
 .thread-content {
   position: absolute;
-  overflow-y: auto;
   width: $s-284;
   padding: $s-12;
   padding-inline-end: $s-8;
@@ -155,10 +158,13 @@
   --translate-x: 0%;
   --translate-y: 0%;
   transform: translate(var(--translate-x), var(--translate-y));
+
   .comments {
     display: flex;
     flex-direction: column;
     gap: $s-24;
+    overflow-y: auto;
+    max-height: $s-320;
   }
 }
 
@@ -225,7 +231,7 @@
 
 .edit-form,
 .reply-form {
-  textarea {
+  .editable-div {
     @extend .input-element;
     @include bodySmallTypography;
     line-height: 1.45;
@@ -236,6 +242,15 @@
     padding: $s-8;
     color: var(--input-foreground-color-active);
     resize: vertical;
+
+    height: $s-64;
+    resize: none;
+
+    display: flex;
+    flex-direction: column;
+    align-items: initial;
+    overflow-y: auto;
+    
     &:focus {
       border: $s-1 solid var(--input-border-color-active);
       outline: none;
@@ -257,5 +272,51 @@
       width: $s-92;
       margin-bottom: 0;
     }
+  }
+}
+
+
+.comments-mentions-choice {
+  background: #212426;
+  border-radius: 8px;
+  border: none;
+  display: flex;
+  flex-direction: column;
+  left: -2px;
+  margin-top: 20px;
+  position: absolute;
+  width: calc(100% + 4px);
+  overflow: hidden;
+}
+
+.comments-mentions-entry {
+  cursor: pointer;
+  display: grid;
+  grid-template-areas:
+    "avatar name"
+    "avatar email";
+  grid-template-columns: $s-32 1fr;
+  column-gap: $s-8;
+  padding: $s-4 $s-12;
+
+  &:hover {
+    background: black;
+  }
+
+  .comments-mentions-avatar {
+    grid-area: avatar;
+    border-radius: 50%;
+  }
+
+  .comments-mentions-name {
+    grid-area: name;
+    font-size: $fs-12;
+    color: white;
+  }
+
+  .comments-mentions-email {
+    grid-area: email;
+    font-size: $fs-12;
+    color: #8f9da3;
   }
 }
